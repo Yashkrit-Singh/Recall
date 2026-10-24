@@ -57,7 +57,9 @@ export async function POST(request: Request) {
     await rename(tempPath, filePath)
     tempPath = undefined
 
-    const title = String(form.get('title') || '').trim().slice(0, 180) || path.basename(file.name, path.extname(file.name)).slice(0, 180) || 'Uploaded video'
+    // Pass a blank value through when omitted. The database stores a generic
+    // placeholder and marks only explicitly supplied fields as user-edited.
+    const title = String(form.get('title') || '').trim().slice(0, 180)
     const description = String(form.get('description') || '').trim().slice(0, 8000)
     const tags = String(form.get('tags') || '').split(',').map(tag => tag.trim()).filter(Boolean).slice(0, 20)
     const { data: itemId, error } = await supabase.rpc('create_saved_video_with_job', {

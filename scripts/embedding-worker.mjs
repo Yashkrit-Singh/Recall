@@ -13,8 +13,6 @@ import {
 
 const { loadEnvConfig } = nextEnv
 
-const POLL_INTERVAL_MS = Number(process.env.EMBEDDING_WORKER_POLL_MS || 1500)
-
 function safeError(error) {
   const message = error instanceof Error ? error.message : 'Embedding generation failed.'
   return message
@@ -64,15 +62,26 @@ export async function processOne({ client, embed = createEmbedding, workerName =
   }
 }
 
+export function assertNomicWorkerEnabled(provider = process.env.RECALL_SEARCH_PROVIDER || 'embeddinggemma2') {
+  const selected = String(provider).trim().toLowerCase()
+  if (selected === 'embeddinggemma2') {
+    throw new Error('The Nomic/Ollama embedding worker is inactive while RECALL_SEARCH_PROVIDER=embeddinggemma2. Start npm run worker:multimodal instead.')
+  }
+  if (selected !== 'nomic') {
+    throw new Error('RECALL_SEARCH_PROVIDER must be either "embeddinggemma2" or "nomic".')
+  }
+}
+
 export async function runWorker() {
   loadEnvConfig(process.cwd())
+  assertNomicWorkerEnabled()
+  const pollInterval = Math.max(250, Math.min(30_000, Number(process.env.EMBEDDING_WORKER_POLL_MS || 1500)))
   const serviceUrl = process.env.NEXT_PUBLIC_SUPABASE_URL
   const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY
   if (!serviceUrl || !serviceKey) {
     throw new Error('Set NEXT_PUBLIC_SUPABASE_URL and server-only SUPABASE_SERVICE_ROLE_KEY before starting the embedding worker.')
   }
   const workerName = process.env.EMBEDDING_WORKER_ID || `${os.hostname()}-${process.pid}`
-  const pollInterval = Number(process.env.EMBEDDING_WORKER_POLL_MS || POLL_INTERVAL_MS)
   const client = createClient(serviceUrl, serviceKey, {
     auth: { autoRefreshToken: false, persistSession: false },
   })

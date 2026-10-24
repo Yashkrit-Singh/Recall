@@ -1,0 +1,11 @@
+# Local multimodal inference for google/embeddinggemma-2. Keep this separate
+# from the Next.js dependencies; PyTorch is a large optional local dependency.
+sentence-transformers>=5.1
+transformers>=4.57
+torch>=2.6
+torchvision>=0.21
+torchcodec>=0.2
+pillow>=11
+soundfile>=0.13
+fastapi>=0.115
+uvicorn>=0.34
