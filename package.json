@@ -14,6 +14,7 @@
     "worker:retrieval": "node scripts/media-retrieval-worker.mjs",
     "worker:retrieval:diagnose": "node scripts/media-retrieval-worker.mjs --diagnose",
     "worker:multimodal": "node scripts/embeddinggemma2-worker.mjs",
+    "worker:telegram": "node scripts/telegram-bot-worker.mjs",
     "embeddinggemma:service": ".venv-embeddinggemma/bin/python scripts/embeddinggemma2-service.py",
     "embeddinggemma:benchmark": ".venv-embeddinggemma/bin/python scripts/embeddinggemma2-benchmark.py",
     "test:embeddinggemma": ".venv-embeddinggemma/bin/python -m unittest discover -s tests -p 'test_*.py'",

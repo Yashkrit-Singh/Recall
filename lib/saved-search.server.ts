@@ -13,6 +13,8 @@ export type SearchItem = {
   created_at: string
   updated_at: string
   rank?: number
+  keyword_rank?: number
+  retrieval_rank?: number
   similarity?: number
   embedding_status?: 'pending' | 'processing' | 'ready' | 'failed'
   embedding_error?: string | null
@@ -104,16 +106,19 @@ export async function searchSavedItems(supabase: SupabaseClient, query: string) 
       })
       if (multimodalError) throw new Error('Multimodal search is unavailable. Apply its additive migration first.')
       const multimodal = (multimodalRows ?? []) as SearchItem[]
-      const fused = new Map<string, { item: SearchItem; score: number }>()
+      const fused = new Map<string, { item: SearchItem; score: number; keywordRank?: number }>()
       const addRanks = (rows: SearchItem[]) => rows.forEach((item, index) => {
         const current = fused.get(item.id) ?? { item, score: 0 }
         current.score += 1 / (60 + index + 1)
+        if (item.rank !== undefined) current.keywordRank = Math.max(current.keywordRank ?? 0, item.rank)
         if (item.similarity !== undefined) current.item = item
         fused.set(item.id, current)
       })
       addRanks(multimodal)
       addRanks(keyword)
-      const items = Array.from(fused.values()).sort((a, b) => b.score - a.score).map(({ item }) => item)
+      const items = Array.from(fused.values()).sort((a, b) => b.score - a.score).map(({ item, score, keywordRank }) => ({
+        ...item, keyword_rank: keywordRank, retrieval_rank: score,
+      }))
       return {
         items: await addIndexingStatus(supabase, items),
         mode: multimodal.length ? 'multimodal' as const : 'keyword' as const,
@@ -142,16 +147,19 @@ export async function searchSavedItems(supabase: SupabaseClient, query: string) 
     const semantic = (semanticRows ?? []) as SearchItem[]
 
     // Reciprocal rank fusion combines two ordered lists without comparing unlike scores.
-    const fused = new Map<string, { item: SearchItem; score: number }>()
+    const fused = new Map<string, { item: SearchItem; score: number; keywordRank?: number }>()
     const addRanks = (rows: SearchItem[]) => rows.forEach((item, index) => {
       const current = fused.get(item.id) ?? { item, score: 0 }
       current.score += 1 / (60 + index + 1)
+      if (item.rank !== undefined) current.keywordRank = Math.max(current.keywordRank ?? 0, item.rank)
       if (item.similarity !== undefined) current.item = item
       fused.set(item.id, current)
     })
     addRanks(semantic)
     addRanks(keyword)
-    const rankedItems = Array.from(fused.values()).sort((a, b) => b.score - a.score).map(({ item }) => item)
+    const rankedItems = Array.from(fused.values()).sort((a, b) => b.score - a.score).map(({ item, score, keywordRank }) => ({
+      ...item, keyword_rank: keywordRank, retrieval_rank: score,
+    }))
     return {
       items: await addIndexingStatus(supabase, rankedItems),
       mode: semantic.length ? 'hybrid' as const : 'keyword' as const,

@@ -7,24 +7,38 @@ import { rm } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { createClient } from '@/lib/supabase/server'
 import { createAdminClient } from '@/lib/supabase/admin.server'
+import { findEquivalentSavedItemId, instagramDuplicateFilters, normalizeSavedUrl } from '@/lib/saved-url.mjs'
 
 function cleanTags(value: FormDataEntryValue | null) {
   return String(value ?? '').split(',').map(tag => tag.trim()).filter(Boolean).slice(0, 20)
 }
-function validUrl(value: string) {
-  try { const url = new URL(value); return url.protocol === 'http:' || url.protocol === 'https:' } catch { return false }
+async function findUserDuplicate(supabase: Awaited<ReturnType<typeof createClient>>, userId: string, normalized: ReturnType<typeof normalizeSavedUrl>, excludeId = '') {
+  let query = supabase.from('saved_items').select('id,source_url').eq('user_id', userId)
+  const filters = instagramDuplicateFilters(normalized)
+  if (filters.length) query = query.or(filters.join(','))
+  else query = query.eq('source_url', normalized.url)
+  if (excludeId) query = query.neq('id', excludeId)
+  const { data, error } = await query
+  if (error) return { error: true, duplicateId: null }
+  return { error: false, duplicateId: findEquivalentSavedItemId(data ?? [], normalized.url, excludeId) }
 }
 
 export async function createItem(formData: FormData) {
   const supabase = await createClient()
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) redirect('/login')
-  const source_url = String(formData.get('source_url') ?? '').trim()
-  if (!validUrl(source_url)) redirect('/saved?error=Add%20a%20valid%20link.')
+  let normalized
+  try { normalized = normalizeSavedUrl(formData.get('source_url')) }
+  catch (error) { redirect(`/saved?error=${encodeURIComponent(error instanceof Error ? error.message : 'Paste a valid video link.')}`) }
+  const source_url = normalized.url
+  const duplicate = await findUserDuplicate(supabase, user.id, normalized)
+  if (duplicate.error) redirect('/saved?error=Could%20not%20check%20for%20an%20existing%20video.')
+  if (duplicate.duplicateId) redirect('/saved?notice=duplicate')
   const item = { user_id: user.id, source_url, title: 'Saved Reel', notes: '', tags: [] as string[] }
   const itemId = randomUUID()
   const retrievalEnabled = process.env.RECALL_YTDLP_ENABLED === 'true'
   let retrievalQueueError = false
+  let retrievalSaved = false
   if (retrievalEnabled) {
     try {
       const admin = createAdminClient()
@@ -39,13 +53,15 @@ export async function createItem(formData: FormData) {
       })
       if (!error) {
         revalidatePath('/saved')
-        return
+        retrievalSaved = true
+      } else {
+        retrievalQueueError = true
       }
-      retrievalQueueError = true
     } catch {
       retrievalQueueError = true
     }
   }
+  if (retrievalSaved) redirect('/saved?saved=1')
   // The URL save remains available if retrieval is disabled or its migration /
   // service configuration is not ready. In that case no retrieval job exists.
   let { data, error } = await supabase.from('saved_items').insert({
@@ -68,6 +84,7 @@ export async function createItem(formData: FormData) {
   }
   if (retrievalQueueError) redirect('/saved?notice=retrieval-not-queued')
   revalidatePath('/saved')
+  redirect('/saved?saved=1')
 }
 
 export async function retryFailedMediaRetrieval(itemId: string) {
@@ -87,9 +104,15 @@ export async function updateItem(formData: FormData) {
   const { data: { user } } = await supabase.auth.getUser()
   if (!user) redirect('/login')
   const id = String(formData.get('id') ?? '')
-  const source_url = String(formData.get('source_url') ?? '').trim()
+  let normalized
+  try { normalized = normalizeSavedUrl(formData.get('source_url')) }
+  catch (error) { redirect(`/saved?error=${encodeURIComponent(error instanceof Error ? error.message : 'Paste a valid video link.')}`) }
+  const source_url = normalized.url
   const title = String(formData.get('title') ?? '').trim()
-  if (!id || !validUrl(source_url) || !title) redirect('/saved?error=Add%20a%20valid%20link%20and%20title.')
+  if (!id || !title) redirect('/saved?error=Add%20a%20valid%20link%20and%20title.')
+  const duplicate = await findUserDuplicate(supabase, user.id, normalized, id)
+  if (duplicate.error) redirect('/saved?error=Could%20not%20check%20for%20an%20existing%20video.')
+  if (duplicate.duplicateId) redirect('/saved?notice=duplicate-edit')
   const item = { source_url, title, notes: String(formData.get('notes') ?? '').trim(), tags: cleanTags(formData.get('tags')) }
   const { error } = await supabase.from('saved_items').update(item).eq('id', id).eq('user_id', user.id)
   if (error) redirect('/saved?error=Could%20not%20update%20that%20item.')

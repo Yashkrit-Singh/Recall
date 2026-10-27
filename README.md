@@ -9,6 +9,7 @@ Recall is a private saved-content library for links, notes, tags, and videos. Em
 - Local Python/Sentence Transformers dependencies for EmbeddingGemma 2 semantic indexing (optional; keyword search remains available)
 - A Supabase service-role key for the trusted local embedding worker
 - FFmpeg/ffprobe for local video indexing; whisper.cpp and Tesseract are optional exact-text tools
+- Optional Telegram bot credentials for private video search
 
 ## Local setup
 
@@ -27,6 +28,7 @@ Recall is a private saved-content library for links, notes, tags, and videos. Em
 13. Follow the local media setup below and run `npm run worker:video` when you want the separate video-processing statuses and optional transcript/OCR extraction. Direct EmbeddingGemma indexing is automatically queued as soon as a saved item has media.
 14. For experimental link retrieval only, review and apply [`supabase/migrations/202610240001_media_retrieval_queue.sql`](supabase/migrations/202610240001_media_retrieval_queue.sql) after migrations 001–007. Review its full SQL and the preservation notes below before applying it; it is never applied by the app or worker.
 15. After the Stage 3, retrieval, and EmbeddingGemma migrations above, inspect [`supabase/migrations/202610260001_video_metadata_generation.sql`](supabase/migrations/202610260001_video_metadata_generation.sql) and apply it manually only after reviewing its effects. This adds an independent metadata queue and status fields; it does not rewrite existing saved items or vector tables. Existing metadata is marked user-edited so it is protected.
+16. To use the Telegram video-search bot, inspect and manually apply [`supabase/migrations/202610270001_telegram_video_bot.sql`](supabase/migrations/202610270001_telegram_video_bot.sql). It adds private pairing tables and a one-time link RPC only; it does not change saved items, vectors, or queues.
 
 Supabase email confirmation may be enabled by default. With confirmation enabled, sign-up shows a message and the user must click the emailed link before signing in. For quick local-only testing, you can disable confirmation in Supabase Auth settings.
 
@@ -38,6 +40,14 @@ Supabase email confirmation may be enabled by default. With confirmation enabled
 | `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Public publishable key (preferred); database access is still restricted by RLS | Yes |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Older public anon key; accepted as a fallback | Yes |
 | `SUPABASE_SERVICE_ROLE_KEY` | Trusted background worker access to the private queue | **No** |
+| `SUPABASE_JWT_SECRET` | Legacy HS256 signing secret used only to mint a 60-second authenticated JWT for Telegram searches under RLS | **No** |
+| `TELEGRAM_BOT_TOKEN` | Telegram Bot API credential; used only by the server and polling worker | **No** |
+| `TELEGRAM_BOT_USERNAME` | Public bot username used to create a Telegram deep link | No |
+| `RECALL_TELEGRAM_WORKER_SECRET` | Shared random secret between the local polling worker and Next.js route | **No** |
+| `RECALL_TELEGRAM_APP_URL` | Local Next.js origin the polling worker calls; set to the actual port | No |
+| `RECALL_TELEGRAM_MIN_SIMILARITY` | EmbeddingGemma-only semantic match floor; initial local pilot value `0.63` | No |
+| `RECALL_TELEGRAM_MIN_KEYWORD_RANK` | Existing keyword RPC rank floor; default `2.5` | No |
+| `RECALL_TELEGRAM_MAX_RESULTS` | Maximum number of bot results, capped at three | No |
 | `NEXT_PUBLIC_SITE_URL` | Origin used to construct the email confirmation callback | Yes |
 | `RECALL_SEARCH_PROVIDER` | `embeddinggemma2` (default) or `nomic` for explicit rollback | No |
 | `EMBEDDINGGEMMA_URL` | Local inference service; defaults to `http://127.0.0.1:11601` | No |
@@ -133,6 +143,18 @@ successfully bound to `127.0.0.1:11601`; do not launch a duplicate copy. The
 metadata worker calls only loopback Ollama and does not send media externally.
 Set `RECALL_YTDLP_ENABLED=true` only for local authorized retrieval. Manual
 uploads still work when retrieval is off.
+
+## Telegram bot: find saved videos
+
+The Telegram bot's only task is retrieval: send a natural-language description and it returns up to three strong, deduplicated saved-video links. It does not answer questions about video contents or expose the web assistant that was previously planned. The saved library remains the place to manage records, metadata, uploads, and indexing.
+
+Create a bot with Telegram's BotFather, then set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_BOT_USERNAME` in `.env.local`. Set `SUPABASE_JWT_SECRET` to the project's **legacy HS256 JWT signing secret** (from Supabase API settings), not the publishable or service-role key. This server-only secret lets Recall mint a 60-second token with the linked user's `sub` and `role=authenticated`; existing semantic and keyword RPCs then run as that user and enforce `auth.uid()` and RLS. Projects that have disabled legacy HS256 signing need a compatible authenticated-token signing method before this integration can be used; do not replace this with a service-role search.
+
+Generate a worker secret with `openssl rand -hex 32` and set it as `RECALL_TELEGRAM_WORKER_SECRET`. Set `RECALL_TELEGRAM_APP_URL` to the local Next.js origin (for example `http://127.0.0.1:3001` if Recall is on port 3001). Apply the Telegram migration manually. Then start `npm run dev` and, in a separate terminal, `npm run worker:telegram`. The worker uses Telegram long polling, so no public webhook or inbound tunnel is needed. In `/saved`, select **Connect Telegram**, open the one-time deep link in a private Telegram chat, and check the connection status. Codes expire after ten minutes; disconnect from the same Recall page to revoke the mapping.
+
+The worker polls Telegram and forwards updates only to the configured local Recall server with the shared secret. Searches use the existing `searchSavedItems` implementation and local EmbeddingGemma query service; no video is reprocessed. EmbeddingGemma similarity is filtered only against its own configured threshold, while keyword-only matches use the existing keyword rank floor. These numeric values are independent and never fused together. `RECALL_TELEGRAM_MIN_SIMILARITY` defaults to `0.63`, a provisional setting checked against two queries over the current seven-item local library: a protein-product paraphrase scored `0.836` for the matching video, while the unrelated “underwater volcano on Mars” query scored at most `0.593`. That gap supported `0.63` for this small pilot; it is not a probability, correctness percentage, or broad calibration. Collect labeled queries from your library and tune it as you use the bot. If no candidate clears its own gate, the bot returns no cards instead of filling the response with weak matches.
+
+This local setup depends on the Mac, Next.js, the EmbeddingGemma service, and internet access to Telegram remaining available. For always-on use, run the poller beside a self-hosted Recall server and local inference service on an always-on machine. A remote hosted app cannot reach a model bound only to your Mac's loopback address without a deliberate private-network deployment.
 
 Review and apply the migrations manually, in order, using Supabase Dashboard →
 SQL Editor → New query. Apply
@@ -234,16 +256,19 @@ app/
   login/                  Sign-in and account creation
   saved/                  Protected library, item forms, search UI, and server actions
   api/search/             Authenticated hybrid search endpoint
+  api/telegram/           Authenticated pairing and internal polling-update endpoints
   api/videos/             Authenticated video upload, playback, and retry endpoints
   globals.css             Tailwind base and page defaults
   layout.tsx              Root layout and metadata
 lib/supabase/             Server client and session-refresh helper
 proxy.ts                  Refreshes Supabase auth cookies for requests
+lib/video-search.mjs       Shared high-precision video candidate filter for the bot
 lib/                       Server-only Ollama/OpenAI embedding and hybrid search helpers
 supabase/migrations/      Table security, pgvector, queues, and video processing schema
 scripts/video-worker.mjs  Local FFmpeg/whisper.cpp/Tesseract queue worker
 scripts/video-metadata-worker.mjs Local-only video metadata generation worker
 scripts/media-retrieval-worker.mjs  Opt-in local yt-dlp retrieval queue worker
+scripts/telegram-bot-worker.mjs     Optional Telegram long-polling adapter
 ```
 # Primary local multimodal search (EmbeddingGemma 2)
 
